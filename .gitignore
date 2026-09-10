@@ -1,0 +1,16 @@
+# Credentials
+.env
+
+# ---------------------------------------------------------------------------
+# PII / employee data — NEVER commit.
+# These contain real names, email addresses, quoted prompts from employees'
+# actual conversations, local file paths, and per-person cost figures.
+# ---------------------------------------------------------------------------
+out/
+profiles/
+findings/
+
+# Scratch
+cohort.txt
+__pycache__/
+*.pyc
