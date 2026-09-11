@@ -10,6 +10,9 @@ out/
 profiles/
 findings/
 
+# Org-specific MCP tool names — keep internal tool naming out of commits.
+retrieval_tools.txt
+
 # Scratch
 cohort.txt
 __pycache__/

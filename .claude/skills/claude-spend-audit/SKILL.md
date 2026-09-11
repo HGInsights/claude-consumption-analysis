@@ -1,6 +1,6 @@
 ---
 name: claude-spend-audit
-description: Audit one HG user's Claude spend and produce a written profile. Use when asked to analyse, audit, or investigate a named user's Claude usage or cost, or to work through a batch of top spenders. Answers not just "how much" but "is this the right compute type and the right model tier for the work".
+description: Audit one user's Claude spend and produce a written profile. Use when asked to analyse, audit, or investigate a named user's Claude usage or cost, or to work through a batch of top spenders. Answers not just "how much" but "is this the right compute type and the right model tier for the work".
 ---
 
 # Claude spend audit — one user

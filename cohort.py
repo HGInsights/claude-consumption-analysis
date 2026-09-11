@@ -2,7 +2,7 @@
 """
 Run the spend investigation across several users and look for shared patterns.
 
-    python3 cohort.py --days 30 --emails a@x.com b@x.com
+    python3 cohort.py --days 30 --emails a@example.com b@example.com
     python3 cohort.py --days 30 --file cohort.txt --transcripts
 
 Metadata by default (no content read). --transcripts adds session shape

@@ -17,12 +17,52 @@ from investigate_user import (Http, load_env, _can_read_analytics, resolve_user,
                               analyze_turns, is_premium, toks)
 
 AGENTIC = ("cowork", "claude_code", "office_agent")
-# tools whose repetition indicates a missing cache rather than real work
-RETRIEVAL = ("hg_data_query","search_companies","get_vendor_information","hg_catalog",
-             "get_product_information","company_technographic","company_firmographic",
-             "WebSearch","jira_search_tickets","jira_get_ticket","pylon_search_issues",
-             "pylon_search_accounts","read_file_content","Read","get_thread",
-             "slack_read_channel","search_threads","get_research_result","lookup_account")
+
+# Tools whose *repetition with identical input* indicates a missing cache
+# rather than real work. Retrieval is read-only and deterministic, so calling
+# it twice with the same argument is waste; a write or a compute tool is not.
+#
+# This list is org-specific: your MCP servers are not ours. The defaults below
+# are the surface-agnostic built-ins plus common SaaS connectors. To add your
+# own, drop a `retrieval_tools.txt` next to this script, one bare tool name per
+# line (`#` comments allowed) — it is gitignored, so your internal tool names
+# never reach a commit. Names are matched after `mcp__server__` is stripped.
+DEFAULT_RETRIEVAL = (
+    # Claude built-ins
+    "WebSearch", "WebFetch", "Read", "Grep", "Glob",
+    # common connector verbs
+    "read_file_content", "get_thread", "search_threads", "slack_read_channel",
+    "jira_search_tickets", "jira_get_ticket", "get_research_result",
+)
+# Fallback for connectors we have never seen: a bare-name prefix heuristic.
+# Read-only verbs only — never `create_`, `update_`, `send_`, `delete_`.
+RETRIEVAL_PREFIXES = ("search_", "get_", "list_", "lookup_", "fetch_", "query_", "read_")
+
+
+def _load_retrieval():
+    """Built-in retrieval names plus any from retrieval_tools.txt."""
+    names = set(DEFAULT_RETRIEVAL)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "retrieval_tools.txt")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line:
+                    names.add(line)
+    except OSError:
+        pass
+    return names
+
+
+RETRIEVAL = _load_retrieval()
+
+
+def is_retrieval(name):
+    """True if a repeated identical call to `name` is waste, not work."""
+    if name in RETRIEVAL:
+        return True
+    return name.startswith(RETRIEVAL_PREFIXES)
 
 
 def shorten(name):
@@ -125,7 +165,7 @@ def main():
                     inp = b.get("input")
                     if isinstance(inp, str) and len(inp) < 400:
                         inputs[(nm, inp[:200])] += 1
-                        if nm in RETRIEVAL:
+                        if is_retrieval(nm):
                             retr_calls.append((nm, inp[:200]))
                 elif t == "tool_result" and b.get("is_error"):
                     errors += 1

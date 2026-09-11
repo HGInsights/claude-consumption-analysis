@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # No dependencies and no credentials: the suite is stdlib-only and offline.
+      - name: Reconstruction checks
+        run: python3 test_reconstruction.py
+      - name: Byte-compile
+        run: python3 -m compileall -q analyze_user.py cohort.py investigate_user.py
