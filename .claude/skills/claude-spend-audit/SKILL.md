@@ -1,6 +1,6 @@
 ---
 name: claude-spend-audit
-description: Audit one HG user's Claude spend and produce a written profile. Use when asked to analyse, audit, or investigate a named user's Claude usage or cost, or to work through a batch of top spenders. Answers not just "how much" but "is this the right compute type and the right model tier for the work".
+description: Audit one user's Claude spend and produce a written profile. Use when asked to analyse, audit, or investigate a named user's Claude usage or cost, or to work through a batch of top spenders. Answers not just "how much" but "is this the right compute type and the right model tier for the work".
 ---
 
 # Claude spend audit — one user
@@ -55,7 +55,7 @@ But note the refinement from `FINDINGS-determinism.md`: most waste is neither
 
 | Flag | Meaning | Usual fix |
 |---|---|---|
-| `NO_MEMOISATION` | >50% of retrieval calls are duplicates | platform cache — **not** a user fix |
+| `NO_MEMOISATION` | >50% of retrieval calls are duplicates | fix the looping skill; TTL-cache our own MCP servers. **Not** a generic platform cache — hooks cannot return cached results and ~91% of duplicates are built-in tools |
 | `FAT_PROJECT` | project attaches >100k tokens per turn | split large files out of the project |
 | `AGENTIC` | >70% spend on Cowork/Code | judge model choice, not turn count |
 | `PREMIUM_HEAVY` | >60% spend on Opus/Fable | candidate for tier downgrade |
@@ -70,7 +70,10 @@ But note the refinement from `FINDINGS-determinism.md`: most waste is neither
 
 From the first six users (`FINDINGS-determinism.md`):
 
-- **No memoisation** (universal) — same query/file/ticket fetched dozens of times.
+- **No memoisation** (universal) — same query/file/ticket fetched dozens of
+  times. Check whether the repeats are built-in tools (`Read`, `Bash`,
+  `web_fetch`, `Grep`) or MCP: only MCP ones are cacheable, the rest need the
+  skill fixed.
 - **Browser-driving an app that has an API** — e.g. editing Slides via
   screenshots, or triaging email through a browser, on a premium model.
   Seen 3x in 24 users.
