@@ -14,7 +14,9 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from investigate_user import (Http, load_env, _can_read_analytics, resolve_user,
                               fetch_cost, fetch_usage, page_walk, cursor_walk,
-                              analyze_turns, is_premium, toks)
+                              analyze_turns, is_premium, toks, session_span_hours,
+                              is_long_context, LONG_LIVED_SPAN_HOURS,
+                              LONG_CONTEXT_TOKENS, classify_trigger)
 
 AGENTIC = ("cowork", "claude_code", "office_agent")
 
@@ -65,6 +67,37 @@ def is_retrieval(name):
     return name.startswith(RETRIEVAL_PREFIXES)
 
 
+# Coarse error buckets, matched against the first few hundred bytes of an
+# error result in memory. The text itself is never stored or written out.
+ERROR_KINDS = (
+    ("timeout", r"timed? ?out|timeout|deadline exceeded"),
+    ("auth", r"\b401\b|\b403\b|unauthori[sz]ed|forbidden|permission denied|"
+             r"not authenticated|invalid (api )?key|token (has )?expired|reauth"),
+    ("rate_limit", r"\b429\b|rate.?limit|too many requests|quota"),
+    ("not_found", r"\b404\b|not found|does not exist|no such file|unknown (tool|id)"),
+    ("too_large", r"too large|exceeds|maximum (allowed )?(size|length|tokens)|truncat"),
+    ("bad_input", r"\b400\b|invalid|validation|required (field|param)|could not be parsed|"
+                  r"unexpected (argument|keyword)|schema"),
+    ("user_rejected", r"user (doesn.t want|rejected|denied|declined)|permission to use .* denied"),
+    ("server_error", r"\b50[0234]\b|internal (server )?error|service unavailable|bad gateway"),
+    ("exit_code", r"exit code|exited with|command failed|non-zero"),
+)
+
+
+def error_kind(text):
+    t = (text or "").lower()
+    for kind, pat in ERROR_KINDS:
+        if re.search(pat, t):
+            return kind
+    return "other"
+
+
+def connector_of(name):
+    """mcp__<server>__tool -> <server>; built-ins -> 'builtin'."""
+    n = name or ""
+    return n.split("__")[1] if n.startswith("mcp__") and n.count("__") >= 2 else "builtin"
+
+
 def shorten(name):
     return (name or "?").split("__")[-1] if (name or "").startswith("mcp__") else (name or "?")
 
@@ -74,6 +107,8 @@ def main():
     ap.add_argument("email")
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--max-sessions", type=int, default=14, help="sessions to deep-read")
+    ap.add_argument("--long-sessions", type=int, default=4,
+                    help="longest-open sessions to deep-read on top of the most recent")
     ap.add_argument("--scan-sessions", type=int, default=60, help="sessions to classify by trigger")
     ap.add_argument("--out", default="out/audits")
     a = ap.parse_args()
@@ -99,10 +134,12 @@ def main():
     cost = sum(r["amount"] for r in cost_rows)
     by_model, by_product = collections.defaultdict(float), collections.defaultdict(float)
     by_ttype = collections.defaultdict(float)
+    by_ctx = collections.defaultdict(float)
     for r in cost_rows:
         by_model[r["model"] or "?"] += r["amount"]
         by_product[r["product"] or "?"] += r["amount"]
         by_ttype[r["token_type"] or "?"] += r["amount"]
+        by_ctx[r["context_window"] or "?"] += r["amount"]
     sys.stderr.write(f"[2/5] cost ${cost:,.2f}\n")
 
     chats = list(cursor_walk(comp, "/v1/compliance/apps/chats",
@@ -111,6 +148,9 @@ def main():
                 {"created_at.gte": S, "limit": 500})
                 if (s.get("user") or {}).get("id") == uid]
     sys.stderr.write(f"[3/5] {len(chats)} chats, {len(sessions)} sessions\n")
+    for s in sessions:
+        s["_span_h"] = session_span_hours(s)
+    spans = sorted((s["_span_h"] for s in sessions), reverse=True)
 
     # --- trigger classification (cheap: first page only) --------------------
     kinds = collections.Counter()
@@ -129,13 +169,12 @@ def main():
             if m.get("role") == "user" and not (m.get("provenance") or {}).get("type") and not txt:
                 txt = "".join(b.get("text", "") for b in (m.get("content") or [])
                               if b.get("type") == "text")
-        sm = re.search(r'<scheduled-task name="([^"]+)"', txt)
-        cm = re.search(r'<command-name>([^<]+)</command-name>', txt)
-        if sm:
-            kinds["scheduled"] += 1; recurring[sm.group(1)].add(s["created_at"][:10])
-        elif cm:
-            kinds["skill"] += 1; recurring["SKILL " + cm.group(1)[:48]].add(s["created_at"][:10])
-        elif txt.strip():
+        kind, name = classify_trigger(msgs)
+        if kind == "scheduled":
+            kinds["scheduled"] += 1; recurring[name].add(s["created_at"][:10])
+        elif kind == "skill":
+            kinds["skill"] += 1; recurring["SKILL " + name].add(s["created_at"][:10])
+        elif kind == "ad-hoc":
             kinds["ad-hoc"] += 1
             c = re.sub(r'<system-reminder>.*?</system-reminder>', '', txt, flags=re.S)
             c = re.sub(r'<uploaded_files>.*?</uploaded_files>', '', c, flags=re.S).strip()
@@ -149,7 +188,18 @@ def main():
     tools = collections.Counter(); pairs = collections.Counter()
     inputs = collections.Counter(); retr_calls = []
     errors = 0; deep = []
-    for s in sessions[:a.max_sessions]:
+    calls_by_tool = collections.Counter()            # full name incl. MCP server
+    errors_by_tool = collections.defaultdict(collections.Counter)  # name -> kind -> n
+    dup_within = collections.Counter()   # repeat of an identical call in the SAME session
+    dup_across = collections.Counter()   # identical call first made in an EARLIER session
+    seen_any = set()
+    # The list is newest-first, so the most recent sessions alone would miss
+    # exactly the long-lived ones. Add the longest-open few on top.
+    recent = sessions[:a.max_sessions]
+    seen = {s["id"] for s in recent}
+    longest = [s for s in sorted(sessions, key=lambda s: -s["_span_h"])
+               if s["id"] not in seen][:a.long_sessions]
+    for s in recent + longest:
         try:
             msgs = list(page_walk(comp,
                         f"/v1/compliance/apps/sessions/local/{s['id']}/messages",
@@ -157,24 +207,46 @@ def main():
         except SystemExit:
             continue
         seq = []
+        seen_here = set()
         for m in msgs:
             for b in m.get("content") or []:
                 t = b.get("type")
                 if t == "tool_use":
-                    nm = shorten(b.get("name")); seq.append(nm); tools[nm] += 1
+                    full = b.get("name") or "?"
+                    nm = shorten(full); seq.append(nm); tools[nm] += 1
+                    calls_by_tool[full] += 1
                     inp = b.get("input")
                     if isinstance(inp, str) and len(inp) < 400:
                         inputs[(nm, inp[:200])] += 1
                         if is_retrieval(nm):
                             retr_calls.append((nm, inp[:200]))
+                            key = (full, inp[:200])
+                            # Re-reading in a new session is not waste: that
+                            # context is gone. Only same-session repeats are.
+                            if key in seen_here:
+                                dup_within[full] += 1
+                            elif key in seen_any:
+                                dup_across[full] += 1
+                            seen_here.add(key); seen_any.add(key)
                 elif t == "tool_result" and b.get("is_error"):
                     errors += 1
+                    txt = " ".join((e.get("text") or "")[:300]
+                                   for e in (b.get("content") or []) if isinstance(e, dict))
+                    errors_by_tool[b.get("name") or "?"][error_kind(txt)] += 1
         for x, y in zip(seq, seq[1:]):
             pairs[(x, y)] += 1
         st = analyze_turns(msgs)
         deep.append({"messages": len(msgs), "tool_calls": len(seq),
                      "assistant_turns": st["assistant_turns"],
-                     "median_gap_s": st["median_gap_s"], "model": st["model"]})
+                     "median_gap_s": st["median_gap_s"], "model": st["model"],
+                     "surface": s.get("product_surface"),
+                     "span_hours": round(s["_span_h"], 1),
+                     "active_days": st["active_days"],
+                     "peak_context_tokens": st["peak_context_tokens"],
+                     "idle_resumes": st["idle_resumes"],
+                     "stale_resumes": st["stale_resumes"],
+                     "stale_resume_tokens": st["stale_resume_tokens"],
+                     "history_exceeds_window": st["history_exceeds_window"]})
 
     dup_rate = 0.0
     if retr_calls:
@@ -206,6 +278,8 @@ def main():
     prem = sum(v for k, v in by_model.items() if is_premium(k))
     agentic = sum(v for k, v in by_product.items() if any(p in k for p in AGENTIC))
     gaps = [d["median_gap_s"] for d in deep if d["assistant_turns"] > 3]
+    long_ctx = sum(v for k, v in by_ctx.items() if is_long_context(k))
+    n_long_lived = sum(1 for h in spans if h > LONG_LIVED_SPAN_HOURS)
 
     flags = []
     if dup_rate > 0.5: flags.append("NO_MEMOISATION")
@@ -221,6 +295,9 @@ def main():
                   if k in ("browser_batch", "computer", "navigate", "get_page_text"))
     if total_tools and browser / total_tools > 0.15: flags.append("BROWSER_DRIVING")
     if any("sleep" in i for (n, i) in inputs if n == "bash"): flags.append("SLEEP_POLLING")
+    if cost and long_ctx / cost > 0.5: flags.append("LONG_CONTEXT")
+    if n_long_lived >= 3: flags.append("LONG_LIVED_SESSIONS")
+    if any(d["stale_resumes"] for d in deep): flags.append("STALE_RESUME")
 
     out = {
         "user": {"email": a.email, "name": user.get("full_name"), "id": uid,
@@ -235,6 +312,8 @@ def main():
                  "by_token_type": {k: round(v, 2) for k, v in sorted(by_ttype.items(), key=lambda x: -x[1])},
                  "premium_share": round(prem / cost, 3) if cost else 0,
                  "agentic_share": round(agentic / cost, 3) if cost else 0,
+                 "by_context_window": {k: round(v, 2) for k, v in sorted(by_ctx.items(), key=lambda x: -x[1])},
+                 "long_context_share": round(long_ctx / cost, 3) if cost else 0,
                  "per_request": round(cost / reqs, 4) if reqs else 0},
         "usage": {k: int(v) for k, v in g.items()},
         "derived": {"tokens_in_per_request": round(tin / reqs) if reqs else 0,
@@ -248,7 +327,26 @@ def main():
                      "recurring_jobs": {k: {"days_seen": len(v), "dates": sorted(v)[-6:]}
                                         for k, v in sorted(recurring.items(),
                                                            key=lambda x: -len(x[1]))},
-                     "by_hour_utc": dict(sorted(byhour.items()))},
+                     "by_hour_utc": dict(sorted(byhour.items())),
+                     "sessions_open_over_24h": n_long_lived,
+                     "sessions_open_over_7d": sum(1 for h in spans if h > 168),
+                     "longest_session_span_h": round(spans[0], 1) if spans else 0},
+        "tool_errors_by_tool": sorted(
+            [{"tool": shorten(n), "connector": connector_of(n),
+              "calls": calls_by_tool.get(n, 0), "errors": sum(k.values()),
+              "error_rate": round(sum(k.values()) / calls_by_tool[n], 3)
+                            if calls_by_tool.get(n) else None,
+              "kinds": dict(k)} for n, k in errors_by_tool.items()],
+            key=lambda x: -x["errors"])[:20],
+        "duplicates": {
+            "within_session": sum(dup_within.values()),
+            "across_sessions": sum(dup_across.values()),
+            "within_session_share_of_tool_calls":
+                round(sum(dup_within.values()) / total_tools, 3) if total_tools else 0,
+            "within_session_by_tool": [
+                {"tool": shorten(n), "connector": connector_of(n), "repeats": c}
+                for n, c in dup_within.most_common(12)],
+        },
         "determinism": {"tool_calls_sampled": total_tools,
                         "tool_errors": errors,
                         "error_rate": round(errors / total_tools, 3) if total_tools else 0,
@@ -262,6 +360,12 @@ def main():
                             for (n, i), c in inputs.most_common(15) if c > 2]},
         "projects": projects,
         "largest_sessions": sorted(deep, key=lambda d: -d["messages"])[:6],
+        # Context sizes rank sessions, they don't price them: tool results are
+        # read truncated (understates) and compaction is invisible (overstates,
+        # hence the 1M cap). Long-context dollars come from Analytics above.
+        "long_sessions": sorted([d for d in deep if d["peak_context_tokens"] >= LONG_CONTEXT_TOKENS
+                                 or d["span_hours"] > LONG_LIVED_SPAN_HOURS],
+                                key=lambda d: -d["peak_context_tokens"])[:6],
         "sample_prompts": prompts[:10],
         "flags": flags,
     }

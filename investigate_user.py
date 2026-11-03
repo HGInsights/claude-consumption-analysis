@@ -51,6 +51,21 @@ CACHE_READ_DISCOUNT = 0.10             # cached input costs ~10% of full price
 CHARS_PER_TOKEN = 3.9                  # readme's heuristic; ranking-grade only
 CACHE_TTL_SECONDS = 5 * 60
 
+# Long-lived sessions (H1 at agentic scale). A session left open for days and
+# resumed carries its whole accumulated context into every later request.
+# 200k matches the Analytics `context_window` bucket boundary, so a transcript
+# flagged here is the same population the billing data prices as "200k-1M".
+LONG_CONTEXT_TOKENS = 200_000
+# Past the longest cache TTL (1h), a resume re-sends the full prefix uncached.
+IDLE_RESUME_SECONDS = 60 * 60
+# An idle resume only matters if there is a lot to re-send.
+STALE_RESUME_TOKENS = 100_000
+# No request can carry more than the largest window. A transcript whose history
+# exceeds it was compacted somewhere, and the transcript does not say where, so
+# context-size metrics are capped here rather than summed past it.
+CONTEXT_WINDOW_MAX = 1_000_000
+LONG_LIVED_SPAN_HOURS = 24
+
 
 def price_for(model):
     if not model:
@@ -195,19 +210,29 @@ def cursor_walk(http, path, params, max_pages=200):
 
 
 # ------------------------------------------------------------- resolution ---
-def resolve_user(comp, email):
-    """Email -> user_id. Requires walking each linked org's user list."""
+def list_orgs(comp):
     orgs = list(page_walk(comp, "/v1/compliance/organizations", {"limit": 100}))
     if not orgs:
         raise SystemExit("No organizations returned. Check compliance key scopes.")
-    target = email.lower().strip()
-    for org in orgs:
-        uuid = org.get("uuid")
+    return orgs
+
+
+def list_users(comp, orgs=None):
+    """Yield (user, org) for every current member of every linked org."""
+    for org in orgs or list_orgs(comp):
         for u in page_walk(comp,
-                           f"/v1/compliance/organizations/{uuid}/users",
+                           f"/v1/compliance/organizations/{org.get('uuid')}/users",
                            {"limit": 500}):
-            if (u.get("email") or "").lower() == target:
-                return u, org
+            yield u, org
+
+
+def resolve_user(comp, email):
+    """Email -> user_id. Requires walking each linked org's user list."""
+    orgs = list_orgs(comp)
+    target = email.lower().strip()
+    for u, org in list_users(comp, orgs):
+        if (u.get("email") or "").lower() == target:
+            return u, org
     raise SystemExit(
         f"\n{email} not found in any linked organization.\n"
         "Users are dropped from this list the moment they leave the org.\n"
@@ -223,32 +248,29 @@ def cents_to_dollars(s):
         return 0.0
 
 
-def fetch_cost(analytics, user_id, start, end):
-    """Actual USD from the Analytics API, grouped by model and product."""
+COST_DIMENSIONS = ("model", "product", "token_type", "context_window")
+
+
+def fetch_cost(analytics, user_id, start, end, group_by=COST_DIMENSIONS):
+    """
+    Actual USD from the Analytics API. `user_id=None` gives the org total.
+
+    `context_window` ("0-200k" / "200k-1M") is the billing-side measure of
+    long-lived context: it is what a session left open for days actually costs,
+    in real dollars rather than reconstructed ones.
+    """
     rows = []
     params = {
         "starting_at": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ending_at": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "bucket_width": "1d",
-        "group_by[]": ["model", "product", "token_type"],
-        "user_ids[]": [user_id],
+        "group_by[]": list(group_by),
+        "user_ids[]": [user_id] if user_id else None,
         "limit": 31,
     }
     resp = analytics.get("/v1/organizations/analytics/cost_report", params)
     refreshed = resp.get("data_refreshed_at")
-    for bucket in resp.get("data", []):
-        for r in bucket.get("results", []):
-            rows.append({
-                "date": bucket.get("starting_at", "")[:10],
-                "amount": cents_to_dollars(r.get("amount")),
-                "model": r.get("model"),
-                "product": r.get("product"),
-                "token_type": r.get("token_type"),
-                "requests": r.get("requests") or 0,
-            })
-    while resp.get("has_more") and resp.get("next_page"):
-        params["page"] = resp["next_page"]
-        resp = analytics.get("/v1/organizations/analytics/cost_report", params)
+    while True:
         for bucket in resp.get("data", []):
             for r in bucket.get("results", []):
                 rows.append({
@@ -257,9 +279,26 @@ def fetch_cost(analytics, user_id, start, end):
                     "model": r.get("model"),
                     "product": r.get("product"),
                     "token_type": r.get("token_type"),
+                    "context_window": r.get("context_window"),
                     "requests": r.get("requests") or 0,
                 })
-    return rows, refreshed
+        if not (resp.get("has_more") and resp.get("next_page")):
+            return rows, refreshed
+        params["page"] = resp["next_page"]
+        resp = analytics.get("/v1/organizations/analytics/cost_report", params)
+
+
+def is_long_context(window):
+    """True for any Analytics context bucket above the 200k boundary."""
+    w = (window or "").lower()
+    return bool(w) and not w.startswith("0-")
+
+
+def long_context_split(cost_rows):
+    """(long-context USD, total USD) from fetch_cost rows."""
+    total = sum(r["amount"] for r in cost_rows)
+    long_ = sum(r["amount"] for r in cost_rows if is_long_context(r.get("context_window")))
+    return long_, total
 
 
 def fetch_usage(analytics, user_id, start, end):
@@ -338,6 +377,14 @@ def analyze_turns(messages, model_hint=None):
     gaps = []
     models = defaultdict(int)
     last_assistant_ts = None      # end of the PREVIOUS assistant turn
+    # Long-lived session shape. Measured from timestamps and content, not
+    # priced -- these stay valid when the dollar reconstruction is rejected.
+    peak_context = 0              # largest context any assistant turn carried
+    idle_resumes = 0              # turns resumed after > IDLE_RESUME_SECONDS
+    stale_resumes = 0             # ... and carrying > STALE_RESUME_TOKENS
+    stale_resume_tokens = 0       # context re-sent uncached on those resumes
+    days = set()
+    first_ts = last_ts = None
 
     for msg in messages:
         content = msg.get("content") or []
@@ -351,8 +398,20 @@ def analyze_turns(messages, model_hint=None):
                 tool_calls += 1
 
         ts = parse_ts(msg.get("created_at"))
+        if ts:
+            days.add(ts.date())
+            first_ts = first_ts or ts
+            last_ts = ts
 
         if role == "assistant":
+            ctx = min(running_tokens, CONTEXT_WINDOW_MAX)
+            peak_context = max(peak_context, ctx)
+            if ts and last_assistant_ts and \
+                    (ts - last_assistant_ts).total_seconds() >= IDLE_RESUME_SECONDS:
+                idle_resumes += 1
+                if ctx >= STALE_RESUME_TOKENS:
+                    stale_resumes += 1
+                    stale_resume_tokens += ctx
             assistant_turns += 1
             if msg.get("model"):
                 models[msg["model"]] += 1
@@ -397,7 +456,46 @@ def analyze_turns(messages, model_hint=None):
         "tool_calls": tool_calls,
         "median_gap_s": int(sorted(gaps)[len(gaps) // 2]) if gaps else 0,
         "model": model,
+        "peak_context_tokens": peak_context,
+        # True when accumulated history outgrew the window: compaction happened,
+        # so peak/stale-resume sizes are a ceiling, not an estimate.
+        "history_exceeds_window": running_tokens > CONTEXT_WINDOW_MAX,
+        "idle_resumes": idle_resumes,
+        "stale_resumes": stale_resumes,
+        "stale_resume_tokens": stale_resume_tokens,
+        "active_days": len(days),
+        "span_hours": round((last_ts - first_ts).total_seconds() / 3600, 1)
+                      if first_ts and last_ts else 0,
     }
+
+
+def classify_trigger(messages):
+    """
+    What started a session: ("scheduled", task name), ("skill", command name),
+    ("ad-hoc", None) or ("no-capture", None). Reads only the first human
+    message, and returns only the task/skill NAME, never the prompt text.
+    """
+    import re
+    first = ""
+    for m in messages:
+        if m.get("role") == "user" and not (m.get("provenance") or {}).get("type"):
+            first = "".join(b.get("text", "") for b in (m.get("content") or [])
+                            if b.get("type") == "text")
+            if first:
+                break
+    sm = re.search(r'<scheduled-task name="([^"]+)"', first)
+    if sm:
+        return "scheduled", sm.group(1)
+    cm = re.search(r"<command-name>([^<]+)</command-name>", first)
+    if cm:
+        return "skill", cm.group(1)[:48]
+    return ("ad-hoc", None) if first.strip() else ("no-capture", None)
+
+
+def session_span_hours(s):
+    """Wall-clock age of a session from list metadata alone (tier 1)."""
+    a, b = parse_ts(s.get("created_at")), parse_ts(s.get("updated_at"))
+    return (b - a).total_seconds() / 3600 if a and b else 0.0
 
 
 def parse_ts(s):
@@ -488,6 +586,10 @@ def flags_for(stats, project_tokens, model):
         f.append("COLD_CACHE")
     if stats["tool_calls"] > 50:
         f.append("AGENTIC_FANOUT")
+    if stats.get("peak_context_tokens", 0) >= LONG_CONTEXT_TOKENS:
+        f.append("LONG_SESSION")
+    if stats.get("stale_resumes", 0):
+        f.append("STALE_RESUME")
     return f
 
 
@@ -570,10 +672,12 @@ def main():
     by_model = defaultdict(float)
     by_product = defaultdict(float)
     by_token_type = defaultdict(float)
+    by_context = defaultdict(float)
     for r in cost_rows:
         by_model[r["model"] or "unknown"] += r["amount"]
         by_product[r["product"] or "unknown"] += r["amount"]
         by_token_type[r["token_type"] or "other"] += r["amount"]
+        by_context[r["context_window"] or "unknown"] += r["amount"]
 
     print(f"      Actual cost: {money(actual)}   (refreshed {refreshed})")
 
@@ -599,6 +703,7 @@ def main():
     surfaces = defaultdict(int)
     for s in sessions:
         surfaces[s.get("product_surface") or "unknown"] += 1
+    spans = sorted((session_span_hours(s) for s in sessions), reverse=True)
 
     print("\n[4/5] Projects and attachment weight...")
     project_ids = {c.get("project_id") for c in chats if c.get("project_id")}
@@ -684,8 +789,8 @@ def main():
         print("\n[5/5] Skipping transcripts (metadata only). Add --transcripts for tier 2.")
 
     render(args, user, org, actual, usage, usage_by_product, by_model, by_product,
-           by_token_type, chats, sessions, remote, surfaces, projects, per_chat,
-           refreshed, start, end)
+           by_token_type, by_context, chats, sessions, spans, remote, surfaces,
+           projects, per_chat, refreshed, start, end)
 
     os.makedirs(args.out, exist_ok=True)
     payload = {
@@ -699,9 +804,12 @@ def main():
         "cost_by_model": dict(by_model),
         "cost_by_product": dict(by_product),
         "cost_by_token_type": dict(by_token_type),
+        "cost_by_context_window": dict(by_context),
         "usage_tokens": usage,
         "usage_by_product": usage_by_product,
         "counts": {"chats": len(chats), "local_sessions": len(sessions),
+                   "sessions_open_over_24h": sum(1 for h in spans if h > LONG_LIVED_SPAN_HOURS),
+                   "longest_session_span_h": round(spans[0], 1) if spans else 0,
                    "remote_sessions": len(remote), "surfaces": dict(surfaces)},
         "projects": projects,
         "per_conversation": per_chat,
@@ -721,6 +829,7 @@ def write_csv(args, per_chat):
     cols = ["kind", "id", "title", "model", "assistant_turns", "content_tokens",
             "billed_input_tokens", "output_tokens", "repayment_multiplier",
             "cold_resumes", "cold_resume_rate", "tool_calls", "median_gap_s",
+            "peak_context_tokens", "stale_resumes", "active_days", "span_hours",
             "project_tokens", "est_cost", "flags"]
     with open(path, "w", newline="") as f:
         w = csv.writer(f)
@@ -731,8 +840,8 @@ def write_csv(args, per_chat):
 
 
 def render(args, user, org, actual, usage, usage_by_product, by_model, by_product,
-           by_token_type, chats, sessions, remote, surfaces, projects, per_chat,
-           refreshed, start, end):
+           by_token_type, by_context, chats, sessions, spans, remote, surfaces,
+           projects, per_chat, refreshed, start, end):
     W = 66
     print(f"\n{'=' * W}")
     print("  FINDINGS")
@@ -764,6 +873,12 @@ def render(args, user, org, actual, usage, usage_by_product, by_model, by_produc
         for k, v in sorted(by_token_type.items(), key=lambda x: -x[1]):
             print(f"  {k:<34} {money(v):>10}  {v / tot * 100:5.1f}%")
 
+    if by_context:
+        print("\nCONTEXT WINDOW  (real dollars on requests carrying >200k context)")
+        tot = sum(by_context.values()) or 1
+        for k, v in sorted(by_context.items(), key=lambda x: -x[1]):
+            print(f"  {k:<22} {money(v):>10}  {bar(v / tot)} {v / tot * 100:4.1f}%")
+
     if usage:
         inp = usage.get("uncached_input", 0)
         cr = usage.get("cache_read", 0)
@@ -789,6 +904,9 @@ def render(args, user, org, actual, usage, usage_by_product, by_model, by_produc
     print(f"  claude.ai chats        {len(chats):>5}")
     print(f"  local sessions         {len(sessions):>5}   {dict(surfaces) or ''}")
     print(f"  remote (Cowork web)    {len(remote):>5}")
+    if spans:
+        print(f"  sessions open >24h     {sum(1 for h in spans if h > LONG_LIVED_SPAN_HOURS):>5}   "
+              f"longest {spans[0]:,.0f}h")
     if projects:
         heavy = max(projects.values(), key=lambda p: p["est_tokens"])
         print(f"  projects               {len(projects):>5}   "
@@ -831,6 +949,17 @@ def render(args, user, org, actual, usage, usage_by_product, by_model, by_produc
             ("H3  PREMIUM MODEL", "STRONG",
              f"{prem_share * 100:.0f}% of spend on premium models. If the work is "
              f"routine, an org default of Sonnet cuts this ~5x. Same-day, reversible."))
+
+    long_ctx = sum(v for k, v in by_context.items() if is_long_context(k))
+    if actual and long_ctx / actual > 0.5:
+        n_long = sum(1 for h in spans if h > LONG_LIVED_SPAN_HOURS)
+        verdicts.append(
+            ("H1  LONG-LIVED CONTEXT", "STRONG",
+             f"{long_ctx / actual * 100:.0f}% of spend ({money(long_ctx)}) is on "
+             f"requests carrying more than 200k tokens of context. "
+             f"{n_long} session(s) stayed open more than a day. A session "
+             f"resumed after hours or days re-sends its whole history uncached; "
+             f"a fresh session per task resets it."))
 
     agentic = sum(v for k, v in by_product.items()
                   if k in ("cowork", "claude_code", "office_agent"))

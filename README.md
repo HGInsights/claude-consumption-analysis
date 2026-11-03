@@ -124,6 +124,37 @@ wrong.
 - **Confirms:** median assistant turns per chat > 20, multiplier > 15.
 - **Fix:** enablement, not technology — "start a new chat when the topic changes".
 
+#### H1 at agentic scale — long-lived sessions
+
+The same quadratic, in Cowork and Claude Code, where a session can stay open
+for weeks. Two things make it expensive even though a warm tool loop is billed
+at the cache-read rate:
+
+- Requests above 200k tokens of context are priced in their own Analytics
+  `context_window` bucket (`200k-1M`). That bucket's real dollars are the
+  measurement: no reconstruction involved.
+- A session **resumed after the cache has expired** re-sends its entire history
+  uncached. A session left open for a week and picked up every few days pays
+  that on every return.
+
+- **Signal (tier 0):** `long_context_share`, the share of a user's Analytics
+  spend in the `200k-1M` bucket. `LONG_CONTEXT` flag above 50%.
+- **Signal (tier 1):** session age from list metadata (`created_at` to
+  `updated_at`). `LONG_LIVED_SESSIONS` flag at 3+ sessions open over 24h.
+- **Signal (tier 2):** `peak_context_tokens`, `stale_resumes` (resumed after
+  over 1h idle while carrying over 100k tokens), `active_days`. Context sizes are
+  approximate in both directions: tool results are read truncated (understates)
+  and compaction is invisible in transcripts (overstates). They are capped at
+  the 1M window, and `history_exceeds_window` marks sessions that must have been
+  compacted. Use them to rank sessions, never to price them.
+- **Fix:** one session per task, not per project. In Claude Code, `/clear` or
+  a new session when the task changes; hand off between sessions through a
+  short notes file rather than by resuming. Don't reopen a days-old session to
+  ask a new question.
+
+Not the same as H5. A long session can have few tool calls, and a heavy
+fan-out can live in short sessions. Check both.
+
 ### H2 — Fat projects
 
 Every file attached to a Project is re-sent as context on **every message of
@@ -162,6 +193,13 @@ file reads, subagents. A non-engineer running agent loops over a folder of
 documents can out-spend an engineer.
 
 - **Signal:** `top_product`, then session transcripts and tool-call counts.
+  `analyze_user.py` adds `tool_errors_by_tool` (failures per tool, bucketed as
+  rate limit, timeout, bad input…) and within- vs across-session duplicate
+  calls. Only same-session repeats are waste.
+- **Unattended jobs:** `org_scan.py --triggers` inventories every scheduled
+  task in the org: runs, cadence, weekend runs, model. It estimates each job's
+  cost from Analytics on "clean days", when the owner ran nothing but scheduled
+  jobs. Only task names are kept, never prompt text.
 - **Fix:** surface gating by role, and model choice within the agentic surface.
 
 ### H6 — The spend is legitimate
@@ -179,7 +217,7 @@ price**, and the action is renegotiation, not restriction.
 ```bash
 git clone <this repo> && cd claude-consumption-analysis
 cp .env.sample .env      # then fill it in; .env is gitignored
-python3 test_reconstruction.py   # 32 offline checks, no credentials needed
+python3 test_reconstruction.py   # 51 offline checks, no credentials needed
 ```
 
 No `pip install` — the toolkit is standard library only.
@@ -216,6 +254,9 @@ Verify this first — it blocks everything else.
 Start at the lowest tier that answers your question, and stop there.
 
 ```bash
+# Tier 0-1 — the whole org: who spends, concentration, long-lived context
+python3 org_scan.py --days 30            # writes out/top_spenders.txt
+
 # Tier 0-1 — metadata only, no transcripts read
 python3 investigate_user.py someone@example.com --days 30
 
@@ -226,6 +267,9 @@ python3 cohort.py --days 30 --file cohort.txt
 # Tier 2 — reads actual conversations. Needs sign-off.
 python3 investigate_user.py someone@example.com --days 30 --transcripts
 python3 cohort.py --days 30 --file cohort.txt --transcripts
+python3 org_scan.py --days 30 --transcripts --deep 25   # shape of longest-open sessions
+python3 org_scan.py --days 30 --triggers                # every session's trigger: finds unattended
+                                                        # scheduled jobs; keeps task names only
 
 # One-shot structured audit of a single user (JSON out, for automation)
 python3 analyze_user.py someone@example.com --days 30 --out out/audits
@@ -338,9 +382,10 @@ projects use `page`/`next_page`. The clients here handle both.
 ```
 investigate_user.py       full single-user diagnosis: clients, cost reconstruction,
                           flags, counterfactuals, hypothesis verdicts
+org_scan.py               org-wide ranking, concentration, long-lived-context scan
 cohort.py                 rank a group of users, assign pattern verdicts
 analyze_user.py           one-shot structured JSON audit, for unattended batches
-test_reconstruction.py    32 offline checks against synthetic transcripts
+test_reconstruction.py    51 offline checks against synthetic transcripts
 ```
 
 ## Contributing
