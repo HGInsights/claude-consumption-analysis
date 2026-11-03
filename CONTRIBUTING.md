@@ -29,7 +29,7 @@ Never commit a real email address, even in a test. Use `someone@example.com`.
 python3 test_reconstruction.py
 ```
 
-32 checks, fully offline, no credentials and no network. They pin the cost
+51 checks, fully offline, no credentials and no network. They pin the cost
 reconstruction against synthetic transcripts with known properties.
 
 **If you change anything in the cost model, the tests must still pass**, and if

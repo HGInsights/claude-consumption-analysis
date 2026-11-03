@@ -8,7 +8,7 @@
 
 ## Checklist
 
-- [ ] `python3 test_reconstruction.py` passes (32 checks, offline)
+- [ ] `python3 test_reconstruction.py` passes (51 checks, offline)
 - [ ] No new dependencies, or the PR explains why one is needed
 - [ ] No employee names, real email addresses, customer names, verbatim prompts,
       or per-person cost figures anywhere in the diff — including test fixtures

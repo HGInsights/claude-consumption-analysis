@@ -8,7 +8,10 @@ Reproduces the fixture numbers quoted in readme.md.
 import sys
 from datetime import datetime, timedelta, timezone
 from investigate_user import (analyze_turns, estimate_cost, price_for, toks,
-                              flags_for, counterfactuals, is_premium, text_len)
+                              flags_for, counterfactuals, is_premium, text_len,
+                              session_span_hours, is_long_context,
+                              long_context_split, LONG_CONTEXT_TOKENS,
+                              CONTEXT_WINDOW_MAX, classify_trigger)
 
 PASS = FAIL = 0
 
@@ -109,6 +112,56 @@ check("trimming the project saves money",
       cf["if_project_trimmed_80pct"] < cf["actual_reconstructed"], True)
 check("warm cache is cheaper than cold",
       cf["if_cache_always_warm"] < cf["actual_reconstructed"], True)
+
+print("\nH1 at agentic scale — long-lived sessions")
+# A warm tool loop that builds ~300k tokens, then sits idle a day and resumes.
+day1 = thread(40, WARM, chars=15_000, model="claude-sonnet-5")
+resume_at = datetime(2026, 9, 2, 12, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+day2 = [{"role": "user", "created_at": resume_at,
+         "content": [{"type": "text", "text": "x" * 400}]},
+        {"role": "assistant", "model": "claude-sonnet-5", "created_at": resume_at,
+         "content": [{"type": "text", "text": "y" * 400}]}]
+ls = analyze_turns(day1 + day2)
+check("peak context crosses the 200k billing boundary",
+      ls["peak_context_tokens"] >= LONG_CONTEXT_TOKENS, True)
+check("a day-long gap counts as one idle resume", ls["idle_resumes"], 1)
+check("resuming a 300k context is a stale resume", ls["stale_resumes"], 1)
+check("stale resume re-sends the whole history",
+      ls["stale_resume_tokens"], ls["peak_context_tokens"])
+check("session spans two active days", ls["active_days"], 2)
+check("span measured first->last message (hours)", ls["span_hours"], 36.0, tol=0.01)
+check("long session flags LONG_SESSION + STALE_RESUME",
+      {"LONG_SESSION", "STALE_RESUME"} <= set(flags_for(ls, 0, "claude-sonnet-5")), True)
+check("45-min human gaps are cold-cache, not idle resumes",
+      analyze_turns(thread(20, COLD))["idle_resumes"], 0)
+check("idle resume on a small context is not stale",
+      analyze_turns(thread(3, 2 * 3600))["stale_resumes"], 0)
+check("session span from list metadata",
+      round(session_span_hours({"created_at": "2026-09-01T00:00:00Z",
+                                "updated_at": "2026-09-08T12:00:00Z"})), 180)
+huge = analyze_turns(thread(160, WARM, chars=15_000, model="claude-sonnet-5"))
+check("context metrics never exceed the 1M window",
+      huge["peak_context_tokens"], CONTEXT_WINDOW_MAX)
+check("history past the window is marked as compacted",
+      (huge["history_exceeds_window"], ls["history_exceeds_window"]), (True, False))
+check("Analytics 200k-1M bucket is long context", is_long_context("200k-1M"), True)
+check("Analytics 0-200k bucket is not", is_long_context("0-200k"), False)
+check("long-context split sums Analytics rows",
+      long_context_split([{"amount": 3.0, "context_window": "200k-1M"},
+                          {"amount": 1.0, "context_window": "0-200k"},
+                          {"amount": 1.0, "context_window": None}]), (3.0, 5.0))
+
+print("\nSession triggers (name only, never prompt text)")
+def opener(text):
+    return [{"role": "user", "content": [{"type": "text", "text": text}]}]
+check("scheduled task detected by name",
+      classify_trigger(opener('<scheduled-task name="daily-digest">do it</scheduled-task>')),
+      ("scheduled", "daily-digest"))
+check("skill detected by command name",
+      classify_trigger(opener("<command-name>/call-prep</command-name>")), ("skill", "/call-prep"))
+check("plain prompt is ad-hoc and returns no text",
+      classify_trigger(opener("summarise my week")), ("ad-hoc", None))
+check("empty session is no-capture", classify_trigger([]), ("no-capture", None))
 
 print("\nEdge cases")
 check("empty transcript does not divide by zero",

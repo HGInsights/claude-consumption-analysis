@@ -23,7 +23,9 @@ from datetime import datetime, timedelta, timezone
 
 from investigate_user import (Http, load_env, _can_read_analytics, resolve_user,
                               fetch_cost, fetch_usage, page_walk, cursor_walk,
-                              analyze_turns, is_premium, money, bar, wrap, toks)
+                              analyze_turns, is_premium, money, bar, wrap, toks,
+                              session_span_hours, long_context_split,
+                              LONG_LIVED_SPAN_HOURS)
 
 AGENTIC_PRODUCTS = ("cowork", "claude_code", "office_agent")
 
@@ -40,6 +42,7 @@ def collect(email, comp, analytics, start, end, transcripts, max_sessions):
     cost_rows, refreshed = fetch_cost(analytics, uid, start, end)
     usage, usage_by_product = fetch_usage(analytics, uid, start, end)
     actual = sum(r["amount"] for r in cost_rows)
+    long_ctx, _ = long_context_split(cost_rows)
 
     by_model, by_product = defaultdict(float), defaultdict(float)
     for r in cost_rows:
@@ -68,6 +71,7 @@ def collect(email, comp, analytics, start, end, transcripts, max_sessions):
         "user_id": uid,
         "role": user.get("organization_role"),
         "cost": actual,
+        "long_context_cost": long_ctx,
         "by_model": dict(by_model),
         "by_product": dict(by_product),
         "usage": usage,
@@ -75,6 +79,9 @@ def collect(email, comp, analytics, start, end, transcripts, max_sessions):
         "n_local": len(sessions),
         "n_remote": len(remote),
         "surfaces": dict(surfaces),
+        "max_span_h": max((session_span_hours(s) for s in sessions), default=0),
+        "n_open_over_24h": sum(1 for s in sessions
+                               if session_span_hours(s) > LONG_LIVED_SPAN_HOURS),
         "sessions": [],
     }
 
@@ -116,6 +123,7 @@ def derive(r):
         "premium_share": prem / cost if cost else 0,
         "fable_share": fable / cost if cost else 0,
         "agentic_share": agentic / cost if cost else 0,
+        "long_context_share": r["long_context_cost"] / cost if cost else 0,
         "requests": reqs,
         "median_gap": statistics.median(gaps) if gaps else None,
         "max_turns": max(turns) if turns else 0,
@@ -141,6 +149,8 @@ def classify(r, d):
         ev.append(f"median gap {d['median_gap']:.0f}s (no human think time)")
     if d["max_turns"] > 500:
         ev.append(f"{d['max_turns']:,}-turn session")
+    if d["long_context_share"] > 0.5:
+        ev.append(f"{d['long_context_share']*100:.0f}% of spend >200k context")
     if d["in_out_ratio"] > 50:
         ev.append(f"{d['in_out_ratio']:.0f}:1 input:output")
 
@@ -231,6 +241,7 @@ def main():
         w = csv.writer(f)
         w.writerow(["email", "name", "cost_usd", "pattern", "confidence",
                     "agentic_share", "premium_share", "fable_share",
+                    "long_context_share", "n_open_over_24h", "max_span_h",
                     "tokens_in_per_req", "in_out_ratio", "cache_hit",
                     "requests", "median_gap_s", "max_turns", "tool_calls",
                     "n_chats", "n_local_sessions", "top_product", "top_model"])
@@ -241,6 +252,8 @@ def main():
             w.writerow([r["email"], r["name"], round(r["cost"], 2), r["pattern"],
                         r["confidence"], round(d["agentic_share"], 3),
                         round(d["premium_share"], 3), round(d["fable_share"], 3),
+                        round(d["long_context_share"], 3), r["n_open_over_24h"],
+                        round(r["max_span_h"], 1),
                         round(d["tokens_in_per_req"]), round(d["in_out_ratio"], 1),
                         round(d["cache_hit"], 3), d["requests"],
                         d["median_gap"], d["max_turns"], d["tool_calls"],
@@ -267,7 +280,7 @@ def report(recs, args, start, end):
     print(f"\n{'=' * W}")
     print("  THE SIGNATURE TEST  (agentic surface + premium model + no think time)")
     print(f"{'=' * W}\n")
-    hdr = (f"  {'user':<20}{'agentic':>9}{'premium':>9}{'fable':>8}"
+    hdr = (f"  {'user':<20}{'agentic':>9}{'premium':>9}{'>200k':>8}"
            f"{'tok/req':>10}{'in:out':>9}{'gap':>7}{'maxturns':>10}")
     print(hdr)
     print(f"  {'-' * 74}")
@@ -276,7 +289,7 @@ def report(recs, args, start, end):
         gap = "-" if d["median_gap"] is None else f"{d['median_gap']:.0f}s"
         print(f"  {(r['name'] or r['email']).split()[0][:19]:<20}"
               f"{d['agentic_share']*100:>8.0f}%{d['premium_share']*100:>8.0f}%"
-              f"{d['fable_share']*100:>7.0f}%{d['tokens_in_per_req']:>10,.0f}"
+              f"{d['long_context_share']*100:>7.0f}%{d['tokens_in_per_req']:>10,.0f}"
               f"{d['in_out_ratio']:>8.0f}:1{gap:>7}{d['max_turns']:>10,}")
 
     # ---- shared patterns ---------------------------------------------------

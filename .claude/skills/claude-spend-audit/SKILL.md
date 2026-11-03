@@ -65,6 +65,22 @@ But note the refinement from `FINDINGS-determinism.md`: most waste is neither
 | `HIGH_ERROR_RATE` | >3% tool errors | silent retry cost |
 | `BROWSER_DRIVING` | >15% browser/screenshot tools | an API almost certainly exists |
 | `SLEEP_POLLING` | `bash sleep` in transcripts | paying inference rates to wait |
+| `LONG_CONTEXT` | >50% of spend on requests with >200k context (Analytics, real $) | one session per task; stop resuming old sessions |
+| `LONG_LIVED_SESSIONS` | ≥3 sessions open >24h (metadata) | same; check whether they are resumed or just left open |
+| `STALE_RESUME` | a session resumed after >1h idle while carrying >100k tokens | the resume re-sends everything uncached; start fresh with a notes file |
+
+## Per-tool fields worth reading
+
+- `duplicates.within_session` / `across_sessions`: only same-session repeats are
+  waste; a re-read in a new session is not. `within_session_share_of_tool_calls`
+  × spend is the honest size of the memoisation problem, much smaller than
+  `duplicate_retrieval_rate`, which counts retrieval calls only.
+- `duplicates.within_session_by_tool` with `connector`: repeats on MCP servers
+  you own are fixable by tool design (batch inputs, static data as a resource,
+  "don't repeat" in the description); built-in repeats need the skill fixed.
+- `tool_errors_by_tool`: errors per tool with a coarse `kinds` breakdown
+  (rate_limit, timeout, bad_input, ...). Rate limits and timeouts point at the
+  connector; bad_input points at the tool description.
 
 ## Known patterns to match against
 
@@ -84,6 +100,10 @@ From the first six users (`FINDINGS-determinism.md`):
 - **Duplicate scheduled jobs** — e.g. two near-identical nightly email checks.
 - **Premium tier on routine work** — summarisation and triage on Opus/Fable.
 - **The same job invented independently** — three people built email triage on three models.
+- **Long-lived sessions** — one Cowork/Code session kept open for days or
+  weeks and resumed for each new task. Check `cost.long_context_share` and
+  `long_sessions`. `active_days` far below the open span means it is
+  being resumed rather than worked continuously.
 
 If a user matches a known pattern, say so and cite the precedent rather than
 re-deriving it.

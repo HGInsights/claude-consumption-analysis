@@ -18,13 +18,16 @@ investigate_user.py       single-user diagnosis. Holds the shared machinery:
                           Http client, load_env, pagination (page_walk /
                           cursor_walk), analyze_turns, pricing, flags,
                           counterfactuals, hypothesis verdicts, rendering.
+org_scan.py               rank every member org-wide; long-lived-context scan
+                          (Analytics context_window + session ages); writes
+                          the top N to a file cohort/analyze_user accept
 cohort.py                 rank a group of users, assign pattern verdicts
 analyze_user.py           one-shot structured JSON audit for unattended batches;
                           imports its primitives from investigate_user
-test_reconstruction.py    32 offline checks, no credentials, no network
+test_reconstruction.py    51 offline checks, no credentials, no network
 ```
 
-`investigate_user.py` is the library as well as a CLI — the other two import from
+`investigate_user.py` is the library as well as a CLI — the others import from
 it. Put shared logic there rather than duplicating it.
 
 ## Commands
@@ -32,9 +35,12 @@ it. Put shared logic there rather than duplicating it.
 ```bash
 python3 investigate_user.py someone@example.com --days 30              # metadata only
 python3 investigate_user.py someone@example.com --days 30 --transcripts # tier 2
+python3 org_scan.py --days 30                                           # tier 0-1, whole org
+python3 org_scan.py --days 30 --transcripts --deep 25                   # + session shape
+python3 org_scan.py --days 30 --triggers                                # + scheduled-job inventory
 python3 cohort.py --days 30 --file cohort.txt
 python3 analyze_user.py someone@example.com --days 30 --out out/audits
-python3 test_reconstruction.py                                          # offline, 32 checks
+python3 test_reconstruction.py                                          # offline, 51 checks
 ```
 
 Credentials come from `.env` (gitignored): `ANTHROPIC_COMPLIANCE_KEY`,
@@ -62,6 +68,12 @@ billed_input = Σ over assistant turns i of ( overhead + Σ tokens of turns befo
 
 Cost is quadratic in conversation length, not linear. `repayment_multiplier`,
 `project_overhead_tokens` and `n_cold_resumes` all fall out of this formula.
+
+Long-lived sessions are the same formula at agentic scale. Their dollars come
+from the Analytics `context_window` dimension (`0-200k` / `200k-1M`), not from
+reconstruction; transcripts only supply shape (`peak_context_tokens`,
+`stale_resumes`, `active_days`). Keep `LONG_CONTEXT_TOKENS` aligned with the
+Analytics bucket boundary.
 README §"The hypothesis tree" lists H1–H6; keep signals traceable to a hypothesis
 rather than adding metrics that don't discriminate between them.
 
