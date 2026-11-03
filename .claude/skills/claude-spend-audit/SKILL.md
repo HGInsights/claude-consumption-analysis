@@ -5,7 +5,8 @@ description: Audit one user's Claude spend and produce a written profile. Use wh
 
 # Claude spend audit — one user
 
-Produces a per-user profile matching the six already in `profiles/`.
+Produces a per-user profile in `profiles/` (gitignored: profiles carry names,
+prompts and per-person cost).
 
 ## Run this first
 
@@ -25,8 +26,8 @@ problem, not a header bug.
 
 ## Then write `profiles/<firstname>-<lastname>.md`
 
-Read the JSON and follow the structure of an existing profile
-(any existing file in `profiles/` is a good template). Required sections:
+Read the JSON. If `profiles/` already holds profiles, match their structure.
+Required sections:
 
 1. **Verdict** — one paragraph. Which of the patterns below, and why.
 2. **Measured** — table from the JSON. Facts only.
@@ -47,15 +48,15 @@ Judge every workload on both:
 **Model tier saves at most ~5x. Moving work to code takes marginal cost to ~0.**
 Weight recommendations accordingly.
 
-But note the refinement from `FINDINGS-determinism.md`: most waste is neither
-— it is **the same correct model work repeated with no memory**. Check
+One refinement: in the audits this skill was developed on, most waste was
+neither — it was **the same correct model work repeated with no memory**. Check
 `determinism.duplicate_retrieval_rate` before recommending any rewrite.
 
 ## Flags the script emits, and what each means
 
 | Flag | Meaning | Usual fix |
 |---|---|---|
-| `NO_MEMOISATION` | >50% of retrieval calls are duplicates | fix the looping skill; TTL-cache our own MCP servers. **Not** a generic platform cache — hooks cannot return cached results and ~91% of duplicates are built-in tools |
+| `NO_MEMOISATION` | >50% of retrieval calls are duplicates | fix the looping skill; TTL-cache MCP servers you own. **Not** a generic platform cache — hooks cannot return cached results, and built-in tools can dominate the duplicates (~91% in one org's sample). Check `duplicates.within_session_by_tool` for yours |
 | `FAT_PROJECT` | project attaches >100k tokens per turn | split large files out of the project |
 | `AGENTIC` | >70% spend on Cowork/Code | judge model choice, not turn count |
 | `PREMIUM_HEAVY` | >60% spend on Opus/Fable | candidate for tier downgrade |
@@ -84,28 +85,30 @@ But note the refinement from `FINDINGS-determinism.md`: most waste is neither
 
 ## Known patterns to match against
 
-From the first six users (`FINDINGS-determinism.md`):
+Patterns that recurred in the audits this skill was developed on (one org, about
+two dozen users). Treat them as priors to check, not base rates:
 
-- **No memoisation** (universal) — same query/file/ticket fetched dozens of
-  times. Check whether the repeats are built-in tools (`Read`, `Bash`,
-  `web_fetch`, `Grep`) or MCP: only MCP ones are cacheable, the rest need the
-  skill fixed.
+- **No memoisation** (in all of the first six users audited) — same
+  query/file/ticket fetched dozens of times. Check whether the repeats are
+  built-in tools (`Read`, `Bash`, `web_fetch`, `Grep`) or MCP: only MCP ones
+  are cacheable, the rest need the skill fixed.
 - **Browser-driving an app that has an API** — e.g. editing Slides via
   screenshots, or triaging email through a browser, on a premium model.
-  Seen 3x in 24 users.
+  Seen in 3 of 24 users in that sample.
 - **Bulk data as chat context** — MBs of CSV re-sent every turn; belongs on
   disk + pandas (Claude Code), or in BI if the report recurs.
 - **Poll-with-sleep** — `bash sleep` in a loop; a workflow-engine problem
   solved with an LLM.
 - **Duplicate scheduled jobs** — e.g. two near-identical nightly email checks.
 - **Premium tier on routine work** — summarisation and triage on Opus/Fable.
-- **The same job invented independently** — three people built email triage on three models.
+- **The same job invented independently** — several people each building
+  their own email triage, each on a different model.
 - **Long-lived sessions** — one Cowork/Code session kept open for days or
   weeks and resumed for each new task. Check `cost.long_context_share` and
   `long_sessions`. `active_days` far below the open span means it is
   being resumed rather than worked continuously.
 
-If a user matches a known pattern, say so and cite the precedent rather than
+If a user matches a known pattern, say so and name the pattern rather than
 re-deriving it.
 
 ## Rules
@@ -115,14 +118,15 @@ re-deriving it.
   quote a reconstructed per-chat dollar figure.
 - **Separate measurement from inference.** The JSON is fact; why they do it is
   a hypothesis. Label it.
-- **Never conclude a workload is wasteful because it is large.** The most
-  tool-heavy user audited ran 93,642 tool calls for $694 — efficiently, on
-  Sonnet. Cost per request and duplicate rate matter far more than volume.
+- **Never conclude a workload is wasteful because it is large.** Tens of
+  thousands of tool calls a month on Sonnet for a few hundred dollars can be
+  entirely efficient. Cost per request and duplicate rate matter far more than
+  volume.
 - **You cannot see value.** Telemetry shows cost, never whether the output was
   read or useful. Say so, and recommend asking the user.
 - **Do not recommend rewrites for non-engineers** without saying who would
-  build it. One marketer authors sophisticated ClickHouse SQL through the
-  model precisely because he cannot write it himself — that is correct use.
+  build it. Someone who writes complex SQL through the model because they
+  cannot write it themselves is using it correctly.
 - This reads employees' actual conversations. Report in aggregate; quote
   prompts sparingly and only where they carry the finding.
 
