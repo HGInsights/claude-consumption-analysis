@@ -25,6 +25,8 @@ cohort.py                 rank a group of users, assign pattern verdicts
 analyze_user.py           one-shot structured JSON audit for unattended batches;
                           imports its primitives from investigate_user
 test_reconstruction.py    51 offline checks, no credentials, no network
+readme_sample.py          README "What you get" sample from invented inputs
+                          through the real render(); --check runs in CI
 ```
 
 `investigate_user.py` is the library as well as a CLI — the others import from
@@ -41,6 +43,7 @@ python3 org_scan.py --days 30 --triggers                                # + sche
 python3 cohort.py --days 30 --file cohort.txt
 python3 analyze_user.py someone@example.com --days 30 --out out/audits
 python3 test_reconstruction.py                                          # offline, 51 checks
+python3 readme_sample.py --check                                        # README sample still matches render()
 ```
 
 Credentials come from `.env` (gitignored): `ANTHROPIC_COMPLIANCE_KEY`,

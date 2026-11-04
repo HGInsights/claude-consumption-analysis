@@ -19,5 +19,7 @@ jobs:
       # No dependencies and no credentials: the suite is stdlib-only and offline.
       - name: Reconstruction checks
         run: python3 test_reconstruction.py
+      - name: README sample matches render() output
+        run: python3 readme_sample.py --check
       - name: Byte-compile
-        run: python3 -m compileall -q analyze_user.py cohort.py investigate_user.py
+        run: python3 -m compileall -q analyze_user.py cohort.py investigate_user.py org_scan.py readme_sample.py

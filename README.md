@@ -28,7 +28,7 @@ Anthropic's documented Enterprise APIs with your own organisation's keys.
 
 One user, 30 days, with transcripts (tier 2). Every name and number below is
 invented, but the output is real: these inputs were run through the toolkit's
-own rendering code. Abridged.
+own rendering code ([`readme_sample.py`](readme_sample.py)). Abridged.
 
 ```
 $ python3 investigate_user.py someone@example.com --days 30 --transcripts
@@ -488,6 +488,7 @@ org_scan.py               org-wide ranking, concentration, long-lived-context sc
 cohort.py                 rank a group of users, assign pattern verdicts
 analyze_user.py           one-shot structured JSON audit, for unattended batches
 test_reconstruction.py    51 offline checks against synthetic transcripts
+readme_sample.py          regenerates the sample output above; --check guards drift
 ```
 
 ## Contributing
