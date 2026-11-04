@@ -66,3 +66,14 @@ model, clearer flags, bug fixes with a test.
 
 Out of scope: dashboards over individuals, ranking employees, anything that reads
 as monitoring rather than cost diagnosis.
+
+## Reporting problems
+
+Bugs and feature ideas: open an issue using one of the templates. Keep real
+transcripts, email addresses and per-person cost out of it.
+
+Security vulnerabilities, and any place where the tool reads, keeps or sends
+more than it says it does: report privately, per [SECURITY.md](SECURITY.md).
+
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).

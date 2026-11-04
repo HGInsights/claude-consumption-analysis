@@ -7,14 +7,38 @@ running on the right model and the right surface.
 Works against any Claude Enterprise org. Python 3.9+, standard library only, no
 dependencies to install.
 
+An independent project, not affiliated with or endorsed by Anthropic. It reads
+Anthropic's documented Enterprise APIs with your own organisation's keys.
+
+## What you need before this works at all
+
+Check these first. Any one of them missing blocks everything else.
+
+- **A usage-based Claude Enterprise contract.** Seat-based legacy contracts
+  expose usage credits only, and the cost endpoints come back empty.
+- **The Primary Owner of the org**, or someone they hand a key to. The
+  Compliance access key can only be created by the Primary Owner. An Admin key
+  reaches the activity feed and nothing else.
+- **An Analytics-scoped key** (`read:analytics`). A plain workspace API key
+  won't do; see [Getting the keys](#getting-the-keys).
+- **Your traffic on a surface the Compliance API covers.** Claude Code via
+  Bedrock, Vertex or Foundry, Claude Code on the web, and Console-API-key
+  sessions are absent from Compliance session data. Orgs on zero data retention
+  (ZDR) or HIPAA-readiness capture no content at all, so only tier 0 works
+  there.
+- **Sign-off from your own Legal and People functions** before tier 2, which
+  reads transcripts. The toolkit can't supply that process; see the warning
+  below.
+
 ---
 
 ## ⚠️ Read this before you run anything
 
 **1. This tool can read your employees' actual conversations.** It is built in
 three tiers of escalating sensitivity — metadata, then titles, then full
-transcripts. Tier 2 pulls what people actually typed. Get Legal and People
-sign-off *before* you use it, tell staff *before* rather than after, scope it to
+transcripts. Tier 2 pulls what people actually typed. Get sign-off from your own
+Legal and People/HR functions (and works council, where you have one) *before*
+you use it, tell staff *before* rather than after, scope it to
 a named investigation rather than standing access, and report in aggregate.
 See [Tiers are a privacy boundary](#tiers-are-a-privacy-boundary).
 
@@ -241,11 +265,8 @@ activity feed and nothing else; it will not work for compliance content.
 The tools probe for this: if `ANTHROPIC_ANALYTICS_KEY` can't read analytics, they
 fall back to the compliance key and print a note.
 
-### Prerequisite
-
-Tier 0 requires a **usage-based** Enterprise contract. Seat-based legacy
-contracts expose usage credits only, and the cost endpoints will be empty.
-Verify this first — it blocks everything else.
+If the cost endpoints return nothing, re-check the contract type under
+[What you need before this works at all](#what-you-need-before-this-works-at-all).
 
 ---
 
@@ -313,7 +334,8 @@ spend and 80% premium-model, H3 is your answer and you can act on Monday.
 
 If you run tier 2, these are the rules that keep it legitimate:
 
-- Legal and People sign-off first; tell people before, not after.
+- Sign-off from your own Legal and People/HR functions first, and from a works
+  council where employment law requires one. Tell people before, not after.
 - Scope to a named investigation, not standing access.
 - Report in aggregate. Don't circulate individual transcripts.
 - **Classify then discard.** Don't warehouse transcripts — retaining prompts and
@@ -395,4 +417,12 @@ negotiable; the cost model is very much open to improvement.
 
 ## Licence
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE). See also [NOTICE](NOTICE).
+
+Not affiliated with or endorsed by Anthropic. "Claude" and "Anthropic" are
+trademarks of Anthropic, PBC.
+
+## Security
+
+Vulnerabilities and privacy-boundary problems: see [SECURITY.md](SECURITY.md).
+Community standards: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

@@ -93,7 +93,8 @@ calls, model mix) stay valid either way — they are measured, not reconstructed
 
 Each tier reads strictly more sensitive data than the last, and users should
 **stop at the lowest tier that answers their question**. Tier 2 (`--transcripts`)
-reads employees' actual conversations and requires Legal/People sign-off.
+reads employees' actual conversations and requires sign-off from the
+deploying org's own Legal/People functions.
 
 When touching tier-2 code, preserve these:
 
