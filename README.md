@@ -1,32 +1,106 @@
 # claude-consumption-analysis
 
-Find out where your organisation's Claude Enterprise bill actually goes — not
+Find out where your organisation's Claude Enterprise bill actually goes: not
 just *who* spends, but *why* each workload costs what it does, and whether it is
-running on the right model and the right surface.
+running on the right model and the right surface. Works against any Claude
+Enterprise org. Python 3.9+, standard library only.
 
-Works against any Claude Enterprise org. Python 3.9+, standard library only, no
-dependencies to install.
+Two things worth knowing before you build anything to control AI spend:
+
+- **Seats are not the cost.** Enterprise is a seat fee *plus* metered tokens at
+  API rates, so at most headcounts the bill is mostly inference. And no
+  third-party gateway can see first-party Chat, Cowork or Claude Code traffic.
+- **Check for a usage leaderboard first.** Uber burned its 2026 AI budget in
+  four months behind an internal leaderboard ranking teams by AI usage. If AI
+  usage appears in any leaderboard, OKR, enablement target or review criterion
+  in your org, removing it is free and is probably worth more than everything
+  else in this repo.
 
 An independent project, not affiliated with or endorsed by Anthropic. It reads
 Anthropic's documented Enterprise APIs with your own organisation's keys.
 
-## What you need before this works at all
+[What you get](#what-you-get) · [Quickstart](#quickstart) ·
+[Will this work for me?](#will-this-work-for-me) ·
+[Privacy tiers](#tiers-are-a-privacy-boundary) ·
+[Is my spend abnormal?](#is-your-per-user-spend-actually-anomalous)
+
+## What you get
+
+One user, 30 days, with transcripts (tier 2). Every name and number below is
+invented, but the output is real: these inputs were run through the toolkit's
+own rendering code. Abridged.
+
+```
+$ python3 investigate_user.py someone@example.com --days 30 --transcripts
+
+Actual spend (Analytics API)        $352.80
+  annualised                        $4,292.40
+
+WHICH MODEL
+  claude-opus-5             $292.82  ███████████████████████····· 83.0% PREMIUM
+  claude-sonnet-5            $59.98  █████······················· 17.0%
+
+  Input tokens per request:      109,746
+  Cache hit rate:                  21.6%
+  Input:output ratio:             123.3 : 1
+  projects                   1   heaviest ~140,000 tok re-sent per turn
+…
+TOP CONVERSATIONS BY RECONSTRUCTED COST
+  ~  $133.40   46t  x22.9   Quarterly pricing review
+              CONTEXT_REPAYMENT FAT_PROJECT COLD_CACHE
+  ~  $110.62   38t  x19.1   Vendor contract comparison
+              CONTEXT_REPAYMENT FAT_PROJECT COLD_CACHE
+  ~   $84.17   31t  x15.3   Board update draft v3
+              CONTEXT_REPAYMENT FAT_PROJECT COLD_CACHE
+  ~    $0.07    3t  x1.3    Rewrite onboarding email
+              PREMIUM_ON_TRIVIAL
+RECONCILIATION
+  reconstructed (sampled)  $337.72
+  actual (full window)     $352.80
+  ratio                    0.96x
+
+SAVINGS BY LEVER (reconstructed, sampled window)
+  if_sonnet                    ~$270.07
+  if_project_trimmed_80pct     ~$193.20
+  if_cache_always_warm         ~$75.25
+  if_split_every_8_turns       ~$66.13
+
+RANKED CAUSES
+  [STRONG] H1/H2  CONTEXT WEIGHT
+      109,746 input tokens per request. Each message is carrying a
+      very large context. That is re-payment (long threads) or a
+      fat project, not hard work.
+  [STRONG] H3  PREMIUM MODEL
+      83% of spend on premium models. If the work is routine, an
+      org default of Sonnet cuts this ~5x. Same-day, reversible.
+…
+```
+
+How to read it: `46t x22.9` is 46 assistant turns, with each token of content
+billed 22.9 times as the thread re-sends its history. The levers overlap, so
+don't add them up; each is the saving from that change alone. When
+reconstruction and billing disagree by more than 40%, the tool rejects its own
+dollar estimates and shows the levers as shares instead
+([why](#what-this-cannot-measure)). Without `--transcripts` you get the
+Analytics sections and the ranked causes, but no per-conversation lines.
+
+## Will this work for me?
 
 Check these first. Any one of them missing blocks everything else.
 
-- **A usage-based Claude Enterprise contract.** Seat-based legacy contracts
+- [ ] **A usage-based Claude Enterprise contract.** Seat-based legacy contracts
   expose usage credits only, and the cost endpoints come back empty.
-- **The Primary Owner of the org**, or someone they hand a key to. The
+- [ ] **The Primary Owner of the org**, or someone they hand a key to. The
   Compliance access key can only be created by the Primary Owner. An Admin key
   reaches the activity feed and nothing else.
-- **An Analytics-scoped key** (`read:analytics`). A plain workspace API key
+- [ ] **An Analytics-scoped key** (`read:analytics`). A plain workspace API key
   won't do; see [Getting the keys](#getting-the-keys).
-- **Your traffic on a surface the Compliance API covers.** Claude Code via
+- [ ] **Your traffic on a surface the Compliance API covers.** Claude Code via
   Bedrock, Vertex or Foundry, Claude Code on the web, and Console-API-key
   sessions are absent from Compliance session data. Orgs on zero data retention
   (ZDR) or HIPAA-readiness capture no content at all, so only tier 0 works
   there.
-- **Sign-off from your own Legal and People functions** before tier 2, which
+- [ ] **Sign-off from your own Legal and People functions** before tier 2, which
   reads transcripts. The toolkit can't supply that process; see the warning
   below.
 
@@ -53,6 +127,18 @@ every commit.
 agentic sessions by up to 19×.** The tools reject their own estimate past 40%
 divergence from billing actuals. That rejection is correct behaviour. See
 [What this cannot measure](#what-this-cannot-measure) before you try to "fix" it.
+
+## Quickstart
+
+```bash
+git clone https://github.com/HGInsights/claude-consumption-analysis.git
+cd claude-consumption-analysis
+python3 test_reconstruction.py      # 51 offline checks: no keys, no network
+cp .env.sample .env                 # add your keys, see "Getting the keys"
+python3 investigate_user.py someone@example.com --days 30   # tier 0-1, no transcripts
+```
+
+Full detail in [Setup](#setup) and [Running it](#running-it).
 
 ---
 
@@ -94,13 +180,6 @@ Sources: [Ramp AI Index](https://ramp.com/data/ai-index-august-2026),
 A non-engineering role sitting at or above the median of Microsoft's *AI
 engineering* organisation is worth investigating. An engineer running agent loops
 at $900/month probably is not.
-
-### The one thing to check before you instrument anything
-
-**Confirm AI usage appears in no leaderboard, OKR, enablement target, or review
-criterion.** Uber burned its 2026 AI budget in four months behind an internal
-leaderboard ranking teams by AI usage. If one exists in your org, removing it is
-free and is probably worth more than everything else in this repo.
 
 ---
 
@@ -239,7 +318,8 @@ price**, and the action is renegotiation, not restriction.
 ## Setup
 
 ```bash
-git clone <this repo> && cd claude-consumption-analysis
+git clone https://github.com/HGInsights/claude-consumption-analysis.git
+cd claude-consumption-analysis
 cp .env.sample .env      # then fill it in; .env is gitignored
 python3 test_reconstruction.py   # 51 offline checks, no credentials needed
 ```
@@ -266,7 +346,7 @@ The tools probe for this: if `ANTHROPIC_ANALYTICS_KEY` can't read analytics, the
 fall back to the compliance key and print a note.
 
 If the cost endpoints return nothing, re-check the contract type under
-[What you need before this works at all](#what-you-need-before-this-works-at-all).
+[Will this work for me?](#will-this-work-for-me).
 
 ---
 
